@@ -3,20 +3,18 @@ import pandas as pd
 import folium
 from streamlit_folium import st_folium
 import os
-import requests
+import json
 from datetime import datetime
 
 # --- 基礎配置 ---
-st.set_page_config(page_title="台灣鄉鎮足跡地圖", layout="wide")
+st.set_page_config(page_title="高雄開發足跡地圖", layout="wide")
 DATA_FILE = "visited_towns.csv"
+GEOJSON_FILE = "town.json"  # 指向妳上傳的檔案
 
-# 更換為更穩定的台灣鄉鎮 GeoJSON 來源 (包含縣市與鄉鎮名稱)
-GEOJSON_URL = "https://raw.githubusercontent.com/chaoyihuang/Taiwan-GeoJSON/master/town.json"
-
+# 初始化已造訪紀錄
 if not os.path.exists(DATA_FILE):
     pd.DataFrame(columns=["TOWNNAME", "COUNTYNAME", "visited_time"]).to_csv(DATA_FILE, index=False)
 
-@st.cache_data
 def load_data():
     return pd.read_csv(DATA_FILE)
 
@@ -29,30 +27,24 @@ def save_visit(town_name, county_name):
         return True
     return False
 
-@st.cache_data(show_spinner="正在載入地圖資料...")
-def get_geojson_data():
-    try:
-        # 加入 headers 模擬瀏覽器請求，避免被 GitHub 拒絕
-        headers = {'User-Agent': 'Mozilla/5.0'}
-        response = requests.get(GEOJSON_URL, headers=headers)
-        if response.status_code == 200:
-            return response.json()
-        else:
-            st.error(f"下載失敗，錯誤代碼：{response.status_code}")
-            return None
-    except Exception as e:
-        st.error(f"發生錯誤：{e}")
+# --- 讀取本地地圖資料 ---
+@st.cache_data
+def get_local_geojson():
+    if os.path.exists(GEOJSON_FILE):
+        with open(GEOJSON_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    else:
         return None
 
 # --- 主介面 ---
 st.title("🗺️ 台灣鄉鎮市區足跡地圖")
-st.info("💡 點擊地圖上的區域即可「打卡」塗色。")
+st.info("💡 檔案已本地化，不再擔心網路斷線或 404！點擊區域即可打卡。")
 
 visited_df = load_data()
-geojson_data = get_geojson_data()
+geojson_data = get_local_geojson()
 
 if geojson_data:
-    # 建立地圖：預設高雄中心
+    # 建立地圖：預設高雄中心 (緯度 22.6, 經度 120.3)
     m = folium.Map(
         location=[22.62, 120.30], 
         zoom_start=11, 
@@ -62,21 +54,21 @@ if geojson_data:
 
     # 設置塗色樣式
     def style_func(feature):
-        # 注意：不同資料源的屬性名稱可能略有不同，這裡對應的是 TOWNNAME 和 COUNTYNAME
+        # 根據 GeoJSON 的屬性抓取名稱
         t_name = feature['properties'].get('TOWNNAME', '')
         c_name = feature['properties'].get('COUNTYNAME', '')
         
         is_visited = ((visited_df['TOWNNAME'] == t_name) & (visited_df['COUNTYNAME'] == c_name)).any()
         
         return {
-            'fillColor': '#FF5722' if is_visited else '#FFFFFF', 
-            'color': '#FF5722' if is_visited else 'gray',
+            'fillColor': '#FF8C00' if is_visited else '#FFFFFF', # 橘色代表去過
+            'color': '#FF8C00' if is_visited else 'gray',
             'weight': 1.5 if is_visited else 0.5,
-            'fillOpacity': 0.5 if is_visited else 0.1,
+            'fillOpacity': 0.6 if is_visited else 0.05, # 未去過設為極低透明度
         }
 
-    # 顯示 GeoJSON
-    g = folium.GeoJson(
+    # 顯示地圖層
+    folium.GeoJson(
         geojson_data,
         style_function=style_func,
         tooltip=folium.GeoJsonTooltip(fields=['COUNTYNAME', 'TOWNNAME'], aliases=['縣市:', '鄉鎮:'])
@@ -93,20 +85,20 @@ if geojson_data:
         
         if t and c:
             with st.sidebar:
-                st.subheader(f"📍 選取區域：{c}{t}")
-                if st.button("確認打卡", use_container_width=True):
+                st.subheader(f"📍 當前選取：{c}{t}")
+                if st.button("確認打卡存檔", use_container_width=True):
                     if save_visit(t, c):
-                        st.success("紀錄成功！")
+                        st.success(f"✅ {t} 打卡成功！")
                         st.rerun()
                     else:
-                        st.warning("這裡已經去過囉！")
+                        st.warning("這個區域已經塗過顏色囉！")
 
-    # 進度統計
+    # 進度條
     st.write("---")
     total = len(geojson_data['features'])
     count = len(visited_df)
-    st.metric("已解鎖鄉鎮", f"{count} / {total}", f"{count/total*100:.1f}%")
+    st.metric("解鎖進度", f"{count} / {total} 個鄉鎮", f"{count/total*100:.1f}%")
     st.progress(count/total if total > 0 else 0)
 
 else:
-    st.warning("地圖載入中或資料暫時無法取得，請稍後再試。")
+    st.error(f"❌ 找不到 {GEOJSON_FILE} 檔案！請確保妳已將地圖檔上傳至 GitHub 根目錄。")

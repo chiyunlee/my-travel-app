@@ -4,54 +4,124 @@ import folium
 from streamlit_folium import st_folium
 import os
 import json
+import requests
 from datetime import datetime
 
-st.set_page_config(page_title="除錯診斷地圖", layout="wide")
-GEOJSON_FILE = os.path.join(os.path.dirname(__file__), "town.json")
+# --- 基礎配置 ---
+st.set_page_config(page_title="高雄開發足跡地圖", layout="wide")
+DATA_FILE = "visited_towns.csv"
+GEOJSON_FILE = "town.json"
+# 正確的台灣鄉鎮 GeoJSON 原始資料網址
+RAW_GEOJSON_URL = "https://raw.githubusercontent.com/g0v/tw-town-geojson/master/town.json"
 
-# --- 診斷區域：直接印出 JSON 結構 ---
-st.subheader("🛠️ 檔案欄位診斷")
-if os.path.exists(GEOJSON_FILE):
-    with open(GEOJSON_FILE, 'r', encoding='utf-8') as f:
-        try:
-            temp_data = json.load(f)
-            first_feature_props = temp_data['features'][0]['properties']
-            st.write("偵測到您的 JSON 檔案欄位如下：")
-            st.code(list(first_feature_props.keys()))
-            st.write("第一個物件內容範例：", first_feature_props)
-        except Exception as e:
-            st.error(f"JSON 解析失敗：{e}")
-else:
-    st.error("找不到 town.json")
+# 初始化已造訪紀錄
+if not os.path.exists(DATA_FILE):
+    pd.DataFrame(columns=["TOWNNAME", "COUNTYNAME", "visited_time"]).to_csv(DATA_FILE, index=False)
 
-# --- 核心邏輯 (加入更多預期欄位) ---
-@st.cache_data
-def get_local_geojson():
+def load_data():
+    return pd.read_csv(DATA_FILE)
+
+def save_visit(town_name, county_name):
+    df = load_data()
+    if not ((df['TOWNNAME'] == town_name) & (df['COUNTYNAME'] == county_name)).any():
+        new_row = pd.DataFrame([[town_name, county_name, datetime.now().strftime("%Y-%m-%d %H:%M")]], 
+                                columns=["TOWNNAME", "COUNTYNAME", "visited_time"])
+        pd.concat([df, new_row], ignore_index=True).to_csv(DATA_FILE, index=False)
+        return True
+    return False
+
+@st.cache_data(show_spinner="正在載入地圖數據（初次載入約需 10 秒）...")
+def get_geojson():
+    # 邏輯：如果本地檔案無效或不存在，就重新下載
+    need_download = True
     if os.path.exists(GEOJSON_FILE):
-        with open(GEOJSON_FILE, 'r', encoding='utf-8') as f:
-            data = json.load(f)
+        try:
+            with open(GEOJSON_FILE, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                if 'features' in data:
+                    need_download = False
+                    # 預處理欄位
+                    for feature in data['features']:
+                        p = feature['properties']
+                        p['C_NAME'] = p.get('COUNTYNAME', '未知')
+                        p['T_NAME'] = p.get('TOWNNAME', '未知')
+                    return data
+        except:
+            need_download = True
+
+    if need_download:
+        try:
+            resp = requests.get(RAW_GEOJSON_URL)
+            data = resp.json()
+            # 存檔供下次使用
+            with open(GEOJSON_FILE, 'w', encoding='utf-8') as f:
+                json.dump(data, f)
             for feature in data['features']:
                 p = feature['properties']
-                # 這裡涵蓋了台灣常見 GeoJSON 的所有可能欄位名
-                p['FINAL_TOWN'] = p.get('TOWNNAME') or p.get('T_Name') or p.get('townname') or p.get('TOWN') or '未知'
-                p['FINAL_COUNTY'] = p.get('COUNTYNAME') or p.get('C_Name') or p.get('countyname') or p.get('COUNTY') or '未知'
+                p['C_NAME'] = p.get('COUNTYNAME', '未知')
+                p['T_NAME'] = p.get('TOWNNAME', '未知')
             return data
-    return None
+        except Exception as e:
+            st.error(f"地圖下載失敗：{e}")
+            return None
 
-geojson_data = get_local_geojson()
+# --- 主介面 ---
+st.title("🗺️ 台灣鄉鎮市區足跡地圖")
+
+visited_df = load_data()
+geojson_data = get_geojson()
+
 if geojson_data:
-    m = folium.Map(location=[22.62, 120.30], zoom_start=11, tiles='https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}', attr='Google')
-    
+    m = folium.Map(
+        location=[22.62, 120.30], 
+        zoom_start=11, 
+        tiles='https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}', 
+        attr='Google'
+    )
+
+    def style_func(feature):
+        t = feature['properties']['T_NAME']
+        c = feature['properties']['C_NAME']
+        is_visited = ((visited_df['TOWNNAME'] == t) & (visited_df['COUNTYNAME'] == c)).any()
+        return {
+            'fillColor': '#FF8C00' if is_visited else '#FFFFFF',
+            'color': '#FF8C00' if is_visited else 'white',
+            'weight': 1.5,
+            'fillOpacity': 0.6 if is_visited else 0.1,
+        }
+
     folium.GeoJson(
         geojson_data,
-        style_function=lambda x: {'fillColor': 'white', 'color': 'orange', 'weight': 1, 'fillOpacity': 0.1},
-        tooltip=folium.GeoJsonTooltip(fields=['FINAL_COUNTY', 'FINAL_TOWN'], aliases=['縣市:', '鄉鎮:'])
+        style_function=style_func,
+        tooltip=folium.GeoJsonTooltip(fields=['C_NAME', 'T_NAME'], aliases=['縣市:', '鄉鎮:'])
     ).add_to(m)
 
-    out = st_folium(m, width="100%", height=400, key="debug_map")
+    output = st_folium(m, width="100%", height=500, key="taiwan_map")
 
-    # 點擊除錯資訊
-    if out.get("last_object_clicked_tooltip"):
-        st.success(f"抓取到 Tooltip 資訊：{out['last_object_clicked_tooltip']}")
-    elif out.get("last_active_drawing"):
-        st.write("抓取到 Drawing 屬性：", out["last_active_drawing"].get("properties"))
+    st.write("---")
+    
+    # 點擊處理
+    selected_t, selected_c = None, None
+    if output.get("last_object_clicked_tooltip"):
+        try:
+            info = output["last_object_clicked_tooltip"]
+            parts = info.split(',')
+            selected_c = parts[0].split(':')[-1].strip()
+            selected_t = parts[1].split(':')[-1].strip()
+        except: pass
+
+    if selected_t and selected_t != "未知":
+        st.subheader(f"📍 您選取了：{selected_c} {selected_t}")
+        if st.button(f"🚩 確認在 {selected_t} 打卡", use_container_width=True):
+            if save_visit(selected_t, selected_c):
+                st.success(f"紀錄成功！{selected_t} 已點亮。")
+                st.balloons()
+                st.rerun()
+    else:
+        st.info("👆 **請在地圖上點擊妳去過的區域**（例如點一下鳳山市區的色塊）。")
+
+    st.write("---")
+    st.metric("已解鎖鄉鎮數量", f"{len(visited_df)} / 368")
+    if not visited_df.empty:
+        with st.expander("查看我的足跡清單"):
+            st.dataframe(visited_df.sort_values(by="visited_time", ascending=False), use_container_width=True)

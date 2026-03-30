@@ -3,12 +3,14 @@ import pandas as pd
 import folium
 from streamlit_folium import st_folium
 from streamlit_js_eval import streamlit_js_eval
+from geopy.geocoders import Nominatim
 from datetime import datetime
 import os
 
 # --- 基礎配置 ---
-st.set_page_config(page_title="我的足跡地圖", layout="centered", initial_sidebar_state="collapsed")
-DATA_FILE = "footprints.csv"
+st.set_page_config(page_title="專業開發踩點 App", layout="centered")
+DATA_FILE = "my_points.csv"
+geolocator = Nominatim(user_agent="my_travel_app_v1")
 
 # 初始化資料檔
 if not os.path.exists(DATA_FILE):
@@ -19,66 +21,82 @@ def load_data():
 
 def save_point(name, lat, lon):
     df = load_data()
-    new_data = pd.DataFrame([[name, lat, lon, datetime.now().strftime("%Y-%m-%d %H:%M")]], 
+    new_row = pd.DataFrame([[name, lat, lon, datetime.now().strftime("%Y-%m-%d %H:%M")]], 
                             columns=["name", "lat", "lon", "time"])
-    pd.concat([df, new_data], ignore_index=True).to_csv(DATA_FILE, index=False)
+    pd.concat([df, new_row], ignore_index=True).to_csv(DATA_FILE, index=False)
 
 # --- 主介面 ---
-st.title("📍 衛星雲端踩點 App")
+st.title("📍 智慧地標搜尋打卡")
 
-# 1. GPS 自動定位功能 (手機開啟時會要求權限)
-st.subheader("🚀 快速打卡")
-loc = streamlit_js_eval(js_expressions="target.geolocation.getCurrentPosition(x => x.coords)", want_output=True)
+# --- 第一部分：搜尋與定位 ---
+st.subheader("🔍 尋找目的地")
+search_query = st.text_input("輸入地址或地標 (例如：高雄展覽館)", placeholder="輸入後按 Enter 搜尋")
 
-with st.expander("展開打卡表單", expanded=True):
-    loc_name = st.text_input("地點名稱 (例如：某某建案、私房景點)")
+# 預設座標（若沒搜尋也沒定位，預設在高雄）
+target_lat, target_lon = 22.62, 120.30
+target_name = ""
+
+if search_query:
+    try:
+        # 使用 geopy 進行地理編碼搜尋
+        location = geolocator.geocode(search_query)
+        if location:
+            target_lat = location.latitude
+            target_lon = location.longitude
+            target_name = search_query
+            st.success(f"找到位置：{location.address}")
+        else:
+            st.error("找不到該地點，請嘗試更詳細的地址。")
+    except Exception as e:
+        st.error(f"搜尋出錯：{e}")
+
+# --- 第二部分：打卡功能 ---
+with st.container():
+    st.write("---")
+    st.info(f"📍 準備打卡點：{target_name if target_name else '當前中心點'}")
     
-    if loc:
-        curr_lat = loc['latitude']
-        curr_lon = loc['longitude']
-        st.info(f"當前 GPS：{curr_lat:.6f}, {curr_lon:.6f}")
-        
-        if st.button("確認踩點", use_container_width=True):
-            if loc_name:
-                save_point(loc_name, curr_lat, curr_lon)
-                st.success(f"✅ {loc_name} 踩點成功！")
-                st.rerun()
-            else:
-                st.error("請輸入地點名稱")
-    else:
-        st.warning("正在取得 GPS 定位中... 請確保手機已開啟定位權限。")
+    col1, col2 = st.columns(2)
+    with col1:
+        st.metric("緯度", f"{target_lat:.6f}")
+    with col2:
+        st.metric("經度", f"{target_lon:.6f}")
 
-# 2. 地圖顯示區域
-st.subheader("🗺️ 我的足跡地圖")
+    if st.button("📌 在此位置打卡存檔", use_container_width=True):
+        final_name = target_name if target_name else f"未命名地點_{datetime.now().strftime('%H%M')}"
+        save_point(final_name, target_lat, target_lon)
+        st.balloons()
+        st.rerun()
+
+# --- 第三部分：地圖顯示 (Google 衛星混合圖) ---
+st.subheader("🗺️ 足跡地圖")
 df_display = load_data()
 
-# 設定地圖中心點（預設在高雄）
-center = [22.62, 120.30] if df_display.empty else [df_display.iloc[-1]['lat'], df_display.iloc[-1]['lon']]
-
-# 建立地圖：使用 Google 衛星混合圖
+# 建立地圖
 m = folium.Map(
-    location=center, 
-    zoom_start=15,
-    tiles='https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}', # Google Hybrid (衛星+路名)
+    location=[target_lat, target_lon], 
+    zoom_start=17, 
+    tiles='https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}', 
     attr='Google'
 )
 
-# 加入底圖切換器（讓你隨時換回標準地圖）
-folium.TileLayer('openstreetmap', name='標準地圖').add_to(m)
-folium.LayerControl().add_to(m)
+# 標記「正在搜尋的點」 (藍色)
+if search_query:
+    folium.Marker(
+        [target_lat, target_lon], 
+        popup="搜尋目標",
+        icon=folium.Icon(color="blue", icon="search")
+    ).add_to(m)
 
-# 標記所有踩點位置
+# 標記「歷史已打卡的點」 (紅色)
 for _, row in df_display.iterrows():
     folium.Marker(
         [row['lat'], row['lon']], 
         popup=f"{row['name']}<br>{row['time']}",
-        icon=folium.Icon(color="red", icon="info-sign")
+        icon=folium.Icon(color="red", icon="check")
     ).add_to(m)
 
-# 渲染地圖至 Streamlit
-st_folium(m, width="100%", height=500)
+st_folium(m, width="100%", height=450)
 
-# 3. 數據清單
-if not df_display.empty:
-    with st.expander("查看歷史足跡清單"):
-        st.dataframe(df_display.sort_values(by="time", ascending=False), use_container_width=True)
+# 歷史清單
+if st.checkbox("查看歷史打卡記錄"):
+    st.dataframe(df_display.sort_values(by="time", ascending=False), use_container_width=True)

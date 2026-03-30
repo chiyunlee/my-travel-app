@@ -9,7 +9,9 @@ from datetime import datetime
 # --- 基礎配置 ---
 st.set_page_config(page_title="高雄開發足跡地圖", layout="wide")
 DATA_FILE = "visited_towns.csv"
-GEOJSON_FILE = "town.json"  # 指向妳上傳的檔案
+# 確保路徑在雲端環境也能正確執行
+base_path = os.path.dirname(__file__)
+GEOJSON_FILE = os.path.join(base_path, "town.json")
 
 # 初始化已造訪紀錄
 if not os.path.exists(DATA_FILE):
@@ -27,24 +29,28 @@ def save_visit(town_name, county_name):
         return True
     return False
 
-# --- 讀取本地地圖資料 ---
 @st.cache_data
 def get_local_geojson():
     if os.path.exists(GEOJSON_FILE):
         with open(GEOJSON_FILE, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    else:
-        return None
+            data = json.load(f)
+            # 強制清理數據：確保每個物件都有必要的屬性，避免渲染錯誤
+            for feature in data['features']:
+                p = feature['properties']
+                # 統一屬性名稱，防止大小寫或格式不一
+                p['TOWNNAME'] = p.get('TOWNNAME', p.get('townname', '未知'))
+                p['COUNTYNAME'] = p.get('COUNTYNAME', p.get('countyname', '未知'))
+            return data
+    return None
 
 # --- 主介面 ---
 st.title("🗺️ 台灣鄉鎮市區足跡地圖")
-st.info("💡 檔案已本地化，不再擔心網路斷線或 404！點擊區域即可打卡。")
 
 visited_df = load_data()
 geojson_data = get_local_geojson()
 
 if geojson_data:
-    # 建立地圖：預設高雄中心 (緯度 22.6, 經度 120.3)
+    # 建立地圖
     m = folium.Map(
         location=[22.62, 120.30], 
         zoom_start=11, 
@@ -54,51 +60,52 @@ if geojson_data:
 
     # 設置塗色樣式
     def style_func(feature):
-        # 根據 GeoJSON 的屬性抓取名稱
-        t_name = feature['properties'].get('TOWNNAME', '')
-        c_name = feature['properties'].get('COUNTYNAME', '')
-        
+        t_name = feature['properties']['TOWNNAME']
+        c_name = feature['properties']['COUNTYNAME']
         is_visited = ((visited_df['TOWNNAME'] == t_name) & (visited_df['COUNTYNAME'] == c_name)).any()
         
         return {
-            'fillColor': '#FF8C00' if is_visited else '#FFFFFF', # 橘色代表去過
+            'fillColor': '#FF8C00' if is_visited else '#FFFFFF',
             'color': '#FF8C00' if is_visited else 'gray',
             'weight': 1.5 if is_visited else 0.5,
-            'fillOpacity': 0.6 if is_visited else 0.05, # 未去過設為極低透明度
+            'fillOpacity': 0.6 if is_visited else 0.01,
         }
 
     # 顯示地圖層
+    fg = folium.FeatureGroup(name="鄉鎮區域")
     folium.GeoJson(
         geojson_data,
         style_function=style_func,
         tooltip=folium.GeoJsonTooltip(fields=['COUNTYNAME', 'TOWNNAME'], aliases=['縣市:', '鄉鎮:'])
-    ).add_to(m)
+    ).add_to(fg)
+    fg.add_to(m)
 
-    # 獲取點擊資訊
-    out = st_folium(m, width="100%", height=600, key="map", returned_objects=["last_active_drawing"])
+    # 渲染地圖 (修正關鍵：減少傳回的對象，避免 AssertionError)
+    out = st_folium(m, width="100%", height=600, key="map")
 
-    # 側邊欄處理打卡
-    if out and out.get('last_active_drawing'):
-        props = out['last_active_drawing']['properties']
-        t = props.get('TOWNNAME')
-        c = props.get('COUNTYNAME')
-        
-        if t and c:
+    # 處理點擊 (st_folium 預設點擊會傳回在 last_object_clicked_tooltip)
+    if out and out.get('last_object_clicked_tooltip'):
+        # 這裡從 tooltip 的文字解析出縣市與鄉鎮
+        click_info = out['last_object_clicked_tooltip']
+        # 預期格式: "縣市: 高雄市, 鄉鎮: 苓雅區"
+        try:
+            parts = click_info.split(',')
+            c = parts[0].split(':')[-1].strip()
+            t = parts[1].split(':')[-1].strip()
+            
             with st.sidebar:
-                st.subheader(f"📍 當前選取：{c}{t}")
-                if st.button("確認打卡存檔", use_container_width=True):
+                st.subheader(f"📍 選取：{c}{t}")
+                if st.button("確認打卡", use_container_width=True):
                     if save_visit(t, c):
                         st.success(f"✅ {t} 打卡成功！")
                         st.rerun()
-                    else:
-                        st.warning("這個區域已經塗過顏色囉！")
+        except:
+            pass
 
-    # 進度條
+    # 進度統計
     st.write("---")
-    total = len(geojson_data['features'])
     count = len(visited_df)
-    st.metric("解鎖進度", f"{count} / {total} 個鄉鎮", f"{count/total*100:.1f}%")
-    st.progress(count/total if total > 0 else 0)
+    st.metric("已解鎖鄉鎮", f"{count} 個區域")
 
 else:
-    st.error(f"❌ 找不到 {GEOJSON_FILE} 檔案！請確保妳已將地圖檔上傳至 GitHub 根目錄。")
+    st.error("❌ 找不到地圖檔，請確認 town.json 已上傳至 GitHub。")

@@ -21,7 +21,6 @@ def load_data():
 
 def save_visit(town_name, county_name):
     df = load_data()
-    # 避免重複紀錄
     if not ((df['TOWNNAME'] == town_name) & (df['COUNTYNAME'] == county_name)).any():
         new_row = pd.DataFrame([[town_name, county_name, datetime.now().strftime("%Y-%m-%d %H:%M")]], 
                                 columns=["TOWNNAME", "COUNTYNAME", "visited_time"])
@@ -34,11 +33,19 @@ def get_local_geojson():
     if os.path.exists(GEOJSON_FILE):
         with open(GEOJSON_FILE, 'r', encoding='utf-8') as f:
             data = json.load(f)
-            # 修正所有可能的欄位名稱
+            # --- 強大掃描邏輯：自動對應縣市與鄉鎮欄位 ---
             for feature in data['features']:
                 p = feature['properties']
-                p['T_NAME'] = p.get('TOWNNAME') or p.get('townname') or p.get('T_Name') or '未知'
-                p['C_NAME'] = p.get('COUNTYNAME') or p.get('countyname') or p.get('C_Name') or '未知'
+                # 遍歷所有欄位，找尋包含 "TOWN" 或 "COUNTY" 的關鍵字
+                t_val = "未知"
+                c_val = "未知"
+                for key, value in p.items():
+                    k_upper = key.upper()
+                    if "TOWN" in k_upper and t_val == "未知": t_val = value
+                    if ("COUNTY" in k_upper or "CITY" in k_upper) and c_val == "未知": c_val = value
+                
+                p['FINAL_TOWN'] = t_val
+                p['FINAL_COUNTY'] = c_val
             return data
     return None
 
@@ -49,7 +56,6 @@ visited_df = load_data()
 geojson_data = get_local_geojson()
 
 if geojson_data:
-    # 1. 建立地圖：預設高雄中心
     m = folium.Map(
         location=[22.62, 120.30], 
         zoom_start=11, 
@@ -57,12 +63,10 @@ if geojson_data:
         attr='Google'
     )
 
-    # 2. 設置塗色樣式
     def style_func(feature):
-        t = feature['properties']['T_NAME']
-        c = feature['properties']['C_NAME']
+        t = feature['properties']['FINAL_TOWN']
+        c = feature['properties']['FINAL_COUNTY']
         is_visited = ((visited_df['TOWNNAME'] == t) & (visited_df['COUNTYNAME'] == c)).any()
-        
         return {
             'fillColor': '#FF8C00' if is_visited else '#FFFFFF',
             'color': '#FF8C00' if is_visited else 'white',
@@ -70,59 +74,52 @@ if geojson_data:
             'fillOpacity': 0.6 if is_visited else 0.1,
         }
 
-    # 3. 加入 GeoJSON 層
     folium.GeoJson(
         geojson_data,
         style_function=style_func,
-        tooltip=folium.GeoJsonTooltip(fields=['C_NAME', 'T_NAME'], aliases=['縣市:', '鄉鎮:'])
+        tooltip=folium.GeoJsonTooltip(fields=['FINAL_COUNTY', 'FINAL_TOWN'], aliases=['縣市:', '鄉鎮:'])
     ).add_to(m)
 
-    # 4. 渲染地圖 (重點：使用 key="taiwan_map" 並回傳所有點擊資料)
+    # 渲染地圖
     output = st_folium(m, width="100%", height=500, key="taiwan_map")
 
-    # --- 5. 處理點擊邏輯 ---
+    # --- 點擊處理 ---
     st.write("---")
     
-    # 嘗試從多個可能的回傳欄位抓取資訊
-    clicked_props = None
-    if output.get("last_active_drawing"):
-        clicked_props = output["last_active_drawing"].get("properties")
-    elif output.get("last_object_clicked_tooltip"):
-        # 如果是 tooltip，嘗試解析字串
+    selected_t = None
+    selected_c = None
+
+    # 優先從 tooltip 抓取資訊（這是最穩定的方式）
+    if output.get("last_object_clicked_tooltip"):
         try:
             info = output["last_object_clicked_tooltip"]
-            # 範例: "縣市: 高雄市, 鄉鎮: 苓雅區"
-            c = info.split(',')[0].split(':')[-1].strip()
-            t = info.split(',')[1].split(':')[-1].strip()
-            clicked_props = {"C_NAME": c, "T_NAME": t}
+            # 解析格式 "縣市: 高雄市, 鄉鎮: 苓雅區"
+            parts = info.split(',')
+            selected_c = parts[0].split(':')[-1].strip()
+            selected_t = parts[1].split(':')[-1].strip()
         except:
             pass
+    # 次要從 active_drawing 抓取
+    elif output.get("last_active_drawing"):
+        props = output["last_active_drawing"].get("properties", {})
+        selected_t = props.get("FINAL_TOWN")
+        selected_c = props.get("FINAL_COUNTY")
 
-    # 顯示打卡按鈕
-    if clicked_props:
-        c_name = clicked_props.get('C_NAME', '未知')
-        t_name = clicked_props.get('T_NAME', '未知')
-        
-        st.subheader(f"📍 您選取了：{c_name} {t_name}")
-        
-        if t_name != '未知':
-            if st.button(f"🚩 確認在 {t_name} 打卡", use_container_width=True):
-                if save_visit(t_name, c_name):
-                    st.success(f"成功！{t_name} 已塗色。")
-                    st.balloons()
-                    st.rerun()
-        else:
-            st.warning("抓取不到區域名稱，請再點擊一次區塊中心。")
+    if selected_t and selected_t != "未知":
+        st.subheader(f"📍 您選取了：{selected_c} {selected_t}")
+        if st.button(f"🚩 確認在 {selected_t} 打卡", use_container_width=True):
+            if save_visit(selected_t, selected_c):
+                st.success(f"紀錄成功！{selected_t} 已點亮。")
+                st.balloons()
+                st.rerun()
     else:
-        st.info("👆 **請直接點擊地圖上的行政區區塊**，下方就會出現打卡按鈕。")
+        st.info("👆 **請點擊地圖上的區塊**，按鈕就會出現囉！")
 
-    # 6. 進度統計
+    # 進度統計
     st.write("---")
-    count = len(visited_df)
-    st.metric("已解鎖鄉鎮數量", f"{count} 個區域")
+    st.metric("已解鎖鄉鎮數量", f"{len(visited_df)} 個區域")
     if not visited_df.empty:
         with st.expander("查看我的足跡清單"):
             st.write(visited_df.sort_values(by="visited_time", ascending=False))
-
 else:
-    st.error("❌ 找不到地圖檔 town.json")
+    st.error("❌ 找不到 town.json")

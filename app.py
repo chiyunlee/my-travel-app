@@ -2,16 +2,17 @@ import streamlit as st
 import pandas as pd
 import folium
 from streamlit_folium import st_folium
+from streamlit_js_eval import streamlit_js_eval
 from datetime import datetime
 import os
 
-# --- 配置與資料初始化 ---
-DATA_FILE = "my_footprints.csv"
+# --- 基礎配置 ---
+st.set_page_config(page_title="我的足跡地圖", layout="centered", initial_sidebar_state="collapsed")
+DATA_FILE = "footprints.csv"
 
-# 如果檔案不存在，建立一個空的資料表
+# 初始化資料檔
 if not os.path.exists(DATA_FILE):
-    df = pd.DataFrame(columns=["name", "lat", "lon", "time"])
-    df.to_csv(DATA_FILE, index=False)
+    pd.DataFrame(columns=["name", "lat", "lon", "time"]).to_csv(DATA_FILE, index=False)
 
 def load_data():
     return pd.read_csv(DATA_FILE)
@@ -20,45 +21,64 @@ def save_point(name, lat, lon):
     df = load_data()
     new_data = pd.DataFrame([[name, lat, lon, datetime.now().strftime("%Y-%m-%d %H:%M")]], 
                             columns=["name", "lat", "lon", "time"])
-    df = pd.concat([df, new_data], ignore_index=True)
-    df.to_csv(DATA_FILE, index=False)
+    pd.concat([df, new_data], ignore_index=True).to_csv(DATA_FILE, index=False)
 
-# --- UI 介面 ---
-st.set_page_config(page_title="我的足跡地圖", layout="centered")
-st.title("📍 極簡旅行踩點")
+# --- 主介面 ---
+st.title("📍 衛星雲端踩點 App")
 
-# 1. 側邊欄：手動輸入踩點資訊
-with st.sidebar:
-    st.header("新增踩點")
-    loc_name = st.text_input("地點名稱", placeholder="例如：駁二特區")
-    # 簡易版先手動輸入，進階版可抓取瀏覽器 GPS
-    lat = st.number_input("緯度 (Lat)", value=22.627, format="%.4f")
-    lon = st.number_input("經度 (Lon)", value=120.301, format="%.4f")
+# 1. GPS 自動定位功能 (手機開啟時會要求權限)
+st.subheader("🚀 快速打卡")
+loc = streamlit_js_eval(js_expressions="target.geolocation.getCurrentPosition(x => x.coords)", want_output=True)
+
+with st.expander("展開打卡表單", expanded=True):
+    loc_name = st.text_input("地點名稱 (例如：某某建案、私房景點)")
     
-    if st.button("確認打卡"):
-        if loc_name:
-            save_point(loc_name, lat, lon)
-            st.success(f"已記錄：{loc_name}")
-            st.rerun()
+    if loc:
+        curr_lat = loc['latitude']
+        curr_lon = loc['longitude']
+        st.info(f"當前 GPS：{curr_lat:.6f}, {curr_lon:.6f}")
+        
+        if st.button("確認踩點", use_container_width=True):
+            if loc_name:
+                save_point(loc_name, curr_lat, curr_lon)
+                st.success(f"✅ {loc_name} 踩點成功！")
+                st.rerun()
+            else:
+                st.error("請輸入地點名稱")
+    else:
+        st.warning("正在取得 GPS 定位中... 請確保手機已開啟定位權限。")
 
-# 2. 主畫面：顯示地圖
+# 2. 地圖顯示區域
+st.subheader("🗺️ 我的足跡地圖")
 df_display = load_data()
-st.subheader(f"目前足跡：共 {len(df_display)} 個地點")
 
-# 建立地圖中心點（預設以最後一個點為中心）
+# 設定地圖中心點（預設在高雄）
 center = [22.62, 120.30] if df_display.empty else [df_display.iloc[-1]['lat'], df_display.iloc[-1]['lon']]
-m = folium.Map(location=center, zoom_start=13)
 
-# 將所有點標記在地圖上
+# 建立地圖：使用 Google 衛星混合圖
+m = folium.Map(
+    location=center, 
+    zoom_start=15,
+    tiles='https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}', # Google Hybrid (衛星+路名)
+    attr='Google'
+)
+
+# 加入底圖切換器（讓你隨時換回標準地圖）
+folium.TileLayer('openstreetmap', name='標準地圖').add_to(m)
+folium.LayerControl().add_to(m)
+
+# 標記所有踩點位置
 for _, row in df_display.iterrows():
     folium.Marker(
         [row['lat'], row['lon']], 
-        popup=f"{row['name']} ({row['time']})",
-        icon=folium.Icon(color="red", icon="check")
+        popup=f"{row['name']}<br>{row['time']}",
+        icon=folium.Icon(color="red", icon="info-sign")
     ).add_to(m)
 
-st_folium(m, width=700, height=450)
+# 渲染地圖至 Streamlit
+st_folium(m, width="100%", height=500)
 
 # 3. 數據清單
-if st.checkbox("顯示足跡清單"):
-    st.table(df_display.sort_values(by="time", ascending=False))
+if not df_display.empty:
+    with st.expander("查看歷史足跡清單"):
+        st.dataframe(df_display.sort_values(by="time", ascending=False), use_container_width=True)

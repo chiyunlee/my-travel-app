@@ -2,43 +2,40 @@ import streamlit as st
 import pandas as pd
 import folium
 from streamlit_folium import st_folium
-import os, json, requests
+import os, json
 from datetime import datetime
 
-# 基本設定
+# 基本配置
 st.set_page_config(page_title="高雄開發足跡地圖", layout="wide")
 DATA = "visited.csv"
-# 更換為更穩定的台灣鄉鎮資料來源 (中研院開放資料鏡像)
-URL = "https://raw.githubusercontent.com/g0v/tw-town-geojson/master/town.json"
+# 直接指向妳 GitHub 上的檔案
+GEO_FILE = "town.json"
 
+# 初始化資料檔
 if not os.path.exists(DATA):
     pd.DataFrame(columns=["T", "C", "time"]).to_csv(DATA, index=False)
 
-@st.cache_data(show_spinner="正在載入地圖數據...")
-def get_map():
-    try:
-        resp = requests.get(URL, timeout=20)
-        # 檢查是否成功抓取
-        if resp.status_code == 200:
-            data = resp.json()
-            for f in data['features']:
-                # 統一欄位名稱
-                f['properties']['CN'] = f['properties'].get('COUNTYNAME', '未知')
-                f['properties']['TN'] = f['properties'].get('TOWNNAME', '未知')
-            return data
-        else:
-            st.error(f"地圖下載失敗，代碼：{resp.status_code}")
-            return None
-    except Exception as e:
-        st.error(f"連線錯誤：{e}")
-        return None
+@st.cache_data
+def get_local_map():
+    # 檢查本地檔案是否存在
+    if os.path.exists(GEO_FILE):
+        with open(GEO_FILE, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        
+        # 統一欄位名稱 (針對 g0v 或政府 Opendata 格式)
+        for f in data.get('features', []):
+            p = f['properties']
+            p['CN'] = p.get('COUNTYNAME') or p.get('C_Name') or '未知'
+            p['TN'] = p.get('TOWNNAME') or p.get('T_Name') or '未知'
+        return data
+    return None
 
 st.title("🗺️ 台灣鄉鎮市區足跡地圖")
 v_df = pd.read_csv(DATA)
-geo = get_map()
+geo = get_local_map()
 
 if geo:
-    # 地圖中心點設在高雄
+    # 預設高雄中心
     m = folium.Map(location=[22.62, 120.30], zoom_start=11, 
                    tiles='https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}', 
                    attr='Google')
@@ -58,7 +55,6 @@ if geo:
     if out and out.get("last_object_clicked_tooltip"):
         info = out["last_object_clicked_tooltip"]
         try:
-            # 修正解析邏輯
             parts = info.split(',')
             c = parts[0].split(':')[-1].strip()
             t = parts[1].split(':')[-1].strip()
@@ -71,11 +67,12 @@ if geo:
                     pd.concat([v_df, new], ignore_index=True).to_csv(DATA, index=False)
                     st.rerun()
         except:
-            st.warning("請精準點擊區域中心")
+            st.warning("請點擊區塊中心")
     else:
-        st.info("👆 請點擊地圖上的行政區區塊進行打卡")
+        st.info("👆 請點擊地圖上的行政區進行打卡")
     
     st.write("---")
     st.metric("解鎖進度", f"{len(v_df)} / 368")
 else:
-    st.info("💡 暫時無法載入地圖，請確認您的網路環境或稍後重新整理。")
+    st.error(f"❌ 找不到 {GEO_FILE} 檔案！")
+    st.info("請確認妳已經將地圖檔上傳至 GitHub，且檔名完全符合「town.json」。")

@@ -9,7 +9,6 @@ from datetime import datetime
 # --- 基礎配置 ---
 st.set_page_config(page_title="高雄開發足跡地圖", layout="wide")
 DATA_FILE = "visited_towns.csv"
-# 確保路徑在雲端環境也能正確執行
 base_path = os.path.dirname(__file__)
 GEOJSON_FILE = os.path.join(base_path, "town.json")
 
@@ -34,12 +33,12 @@ def get_local_geojson():
     if os.path.exists(GEOJSON_FILE):
         with open(GEOJSON_FILE, 'r', encoding='utf-8') as f:
             data = json.load(f)
-            # 強制清理數據：確保每個物件都有必要的屬性，避免渲染錯誤
+            # 修正欄位偵測邏輯，解決「未知」問題
             for feature in data['features']:
                 p = feature['properties']
-                # 統一屬性名稱，防止大小寫或格式不一
-                p['TOWNNAME'] = p.get('TOWNNAME', p.get('townname', '未知'))
-                p['COUNTYNAME'] = p.get('COUNTYNAME', p.get('countyname', '未知'))
+                # 自動尋找可能的縣市與鄉鎮 Key (有些 JSON 是小寫，有些是 C_Name)
+                p['TOWN'] = p.get('TOWNNAME') or p.get('townname') or p.get('T_Name') or '未知'
+                p['COUNTY'] = p.get('COUNTYNAME') or p.get('countyname') or p.get('C_Name') or '未知'
             return data
     return None
 
@@ -60,52 +59,61 @@ if geojson_data:
 
     # 設置塗色樣式
     def style_func(feature):
-        t_name = feature['properties']['TOWNNAME']
-        c_name = feature['properties']['COUNTYNAME']
+        t_name = feature['properties']['TOWN']
+        c_name = feature['properties']['COUNTY']
         is_visited = ((visited_df['TOWNNAME'] == t_name) & (visited_df['COUNTYNAME'] == c_name)).any()
         
         return {
             'fillColor': '#FF8C00' if is_visited else '#FFFFFF',
-            'color': '#FF8C00' if is_visited else 'gray',
-            'weight': 1.5 if is_visited else 0.5,
-            'fillOpacity': 0.6 if is_visited else 0.01,
+            'color': '#FF8C00' if is_visited else 'white',
+            'weight': 2 if is_visited else 1,
+            'fillOpacity': 0.6 if is_visited else 0.1,
         }
 
-    # 顯示地圖層
-    fg = folium.FeatureGroup(name="鄉鎮區域")
     folium.GeoJson(
         geojson_data,
         style_function=style_func,
-        tooltip=folium.GeoJsonTooltip(fields=['COUNTYNAME', 'TOWNNAME'], aliases=['縣市:', '鄉鎮:'])
-    ).add_to(fg)
-    fg.add_to(m)
+        tooltip=folium.GeoJsonTooltip(fields=['COUNTY', 'TOWN'], aliases=['縣市:', '鄉鎮:'])
+    ).add_to(m)
 
-    # 渲染地圖 (修正關鍵：減少傳回的對象，避免 AssertionError)
-    out = st_folium(m, width="100%", height=600, key="map")
+    # 渲染地圖
+    out = st_folium(m, width="100%", height=500, key="map")
 
-    # 處理點擊 (st_folium 預設點擊會傳回在 last_object_clicked_tooltip)
+    # --- 關鍵修正：直接在地圖下方顯示打卡區域 ---
+    st.write("---")
     if out and out.get('last_object_clicked_tooltip'):
-        # 這裡從 tooltip 的文字解析出縣市與鄉鎮
         click_info = out['last_object_clicked_tooltip']
-        # 預期格式: "縣市: 高雄市, 鄉鎮: 苓雅區"
         try:
+            # 解析地圖回傳的文字
             parts = click_info.split(',')
             c = parts[0].split(':')[-1].strip()
             t = parts[1].split(':')[-1].strip()
             
-            with st.sidebar:
-                st.subheader(f"📍 選取：{c}{t}")
-                if st.button("確認打卡", use_container_width=True):
+            st.subheader(f"📍 當前選取區域：{c} {t}")
+            
+            # 檢查是否已去過
+            is_visited = ((visited_df['TOWNNAME'] == t) & (visited_df['COUNTYNAME'] == c)).any()
+            
+            if is_visited:
+                st.warning(f"✅ 您已經在 {t} 留下足跡囉！")
+            else:
+                if st.button(f"🚩 確認在「{t}」打卡", use_container_width=True):
                     if save_visit(t, c):
-                        st.success(f"✅ {t} 打卡成功！")
+                        st.success(f"成功記錄！恭喜解鎖 {t}。")
+                        st.balloons()
                         st.rerun()
-        except:
-            pass
+        except Exception as e:
+            st.info("請點擊地圖上的區塊進行打卡。")
+    else:
+        st.info("👆 請在地圖上點擊妳去過的鄉鎮區塊，下方會出現打卡按鈕喔！")
 
     # 進度統計
     st.write("---")
     count = len(visited_df)
-    st.metric("已解鎖鄉鎮", f"{count} 個區域")
+    st.metric("已解鎖鄉鎮數量", f"{count} 個區域")
+    if not visited_df.empty:
+        with st.expander("查看我的足跡清單"):
+            st.dataframe(visited_df.sort_values(by="visited_time", ascending=False), use_container_width=True)
 
 else:
-    st.error("❌ 找不到地圖檔，請確認 town.json 已上傳至 GitHub。")
+    st.error("❌ 找不到地圖檔 town.json")

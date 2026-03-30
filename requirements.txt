@@ -4,3 +4,5 @@ folium
 pandas
 streamlit-js-eval
 geopy
+geopandas
+requests

@@ -2,101 +2,134 @@ import streamlit as st
 import pandas as pd
 import folium
 from streamlit_folium import st_folium
-from streamlit_js_eval import streamlit_js_eval
-from geopy.geocoders import Nominatim
-from datetime import datetime
+import geopandas as gpd
 import os
+import json
+import requests
 
-# --- 基礎配置 ---
-st.set_page_config(page_title="專業開發踩點 App", layout="centered")
-DATA_FILE = "my_points.csv"
-geolocator = Nominatim(user_agent="my_travel_app_v1")
+# --- 基础配置 ---
+st.set_page_config(page_title="台湾乡镇踩点地图", layout="wide", initial_sidebar_state="collapsed")
+DATA_FILE = "visited_towns.csv"
 
-# 初始化資料檔
+# 台湾乡镇 GeoJSON 数据链接 (由台湾政府公开资料整理)
+# 这个链接包含了全台湾所有乡镇市区的边界轮廓
+GEOJSON_URL = "https://raw.githubusercontent.com/g0v/tw-town-geojson/master/town.json"
+
+# 初始化已造访数据
 if not os.path.exists(DATA_FILE):
-    pd.DataFrame(columns=["name", "lat", "lon", "time"]).to_csv(DATA_FILE, index=False)
+    # 栏位：TOWNNAME (乡镇名), COUNTYNAME (县市名), visited_time (时间)
+    pd.DataFrame(columns=["TOWNNAME", "COUNTYNAME", "visited_time"]).to_csv(DATA_FILE, index=False)
 
+@st.cache_data
 def load_data():
     return pd.read_csv(DATA_FILE)
 
-def save_point(name, lat, lon):
+def save_visit(town_name, county_name):
     df = load_data()
-    new_row = pd.DataFrame([[name, lat, lon, datetime.now().strftime("%Y-%m-%d %H:%M")]], 
-                            columns=["name", "lat", "lon", "time"])
-    pd.concat([df, new_row], ignore_index=True).to_csv(DATA_FILE, index=False)
+    # 检查是否重复打卡
+    if not ((df['TOWNNAME'] == town_name) & (df['COUNTYNAME'] == county_name)).any():
+        from datetime import datetime
+        new_row = pd.DataFrame([[town_name, county_name, datetime.now().strftime("%Y-%m-%d %H:%M")]], 
+                                columns=["TOWNNAME", "COUNTYNAME", "visited_time"])
+        pd.concat([df, new_row], ignore_index=True).to_csv(DATA_FILE, index=False)
+        return True
+    return False
 
-# --- 主介面 ---
-st.title("📍 智慧地標搜尋打卡")
-
-# --- 第一部分：搜尋與定位 ---
-st.subheader("🔍 尋找目的地")
-search_query = st.text_input("輸入地址或地標 (例如：高雄展覽館)", placeholder="輸入後按 Enter 搜尋")
-
-# 預設座標（若沒搜尋也沒定位，預設在高雄）
-target_lat, target_lon = 22.62, 120.30
-target_name = ""
-
-if search_query:
+# --- 核心：下载并缓存 GeoJSON 地图数据 ---
+@st.cache_data
+def get_geojson_data():
     try:
-        # 使用 geopy 進行地理編碼搜尋
-        location = geolocator.geocode(search_query)
-        if location:
-            target_lat = location.latitude
-            target_lon = location.longitude
-            target_name = search_query
-            st.success(f"找到位置：{location.address}")
-        else:
-            st.error("找不到該地點，請嘗試更詳細的地址。")
+        response = requests.get(GEOJSON_URL)
+        return response.json()
     except Exception as e:
-        st.error(f"搜尋出錯：{e}")
+        st.error(f"无法下载地图数据：{e}")
+        return None
 
-# --- 第二部分：打卡功能 ---
-with st.container():
+# --- 主界面 ---
+st.title("🗺️ 台湾乡镇市区足迹地图")
+st.markdown("在地圖上點擊你**「去過的鄉鎮」**，它就會自動塗上顏色！")
+
+# 加载数据
+visited_df = load_data()
+geojson_data = get_geojson_data()
+
+if geojson_data:
+    # 建立 Folium 地图 (預設以高雄為中心)
+    m = folium.Map(
+        location=[22.62, 120.30], 
+        zoom_start=11, 
+        # 使用 Google 卫星混合图作为背景
+        tiles='https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}', 
+        attr='Google'
+    )
+
+    # 定义已造访行政区的样式 (例如：半透明橙色)
+    def style_function(feature):
+        town_name = feature['properties']['TOWNNAME']
+        county_name = feature['properties']['COUNTYNAME']
+        
+        # 检查这个乡镇是否在已造访清单中
+        is_visited = ((visited_df['TOWNNAME'] == town_name) & (visited_df['COUNTYNAME'] == county_name)).any()
+        
+        return {
+            'fillColor': '#ff7800' if is_visited else '#ffffff00', # 去过涂橘色，没去过透明
+            'color': '#ff7800' if is_visited else 'gray',          # 边界颜色
+            'weight': 1.5 if is_visited else 0.5,                  # 边界粗细
+            'fillOpacity': 0.7 if is_visited else 0,               # 透明度
+        }
+
+    # 将 GeoJSON 地图层加入 Folium
+    geo_json_layer = folium.GeoJson(
+        geojson_data,
+        name="台湾乡镇边界",
+        style_function=style_function,
+        tooltip=folium.GeoJsonTooltip(fields=['COUNTYNAME', 'TOWNNAME'], aliases=['县市', '乡镇'])
+    ).add_to(m)
+
+    # 渲染地图至 Streamlit，并开启点击事件捕获
+    map_data = st_folium(m, width="100%", height=600, key="taiwan_map", returned_objects=["last_active_drawing"])
+
+    # --- 处理地图点击事件 ---
+    if map_data['last_active_drawing']:
+        # 获取点击的乡镇属性
+        props = map_data['last_active_drawing']['properties']
+        clicked_town = props['TOWNNAME']
+        clicked_county = props['COUNTYNAME']
+        
+        with st.sidebar:
+            st.subheader(f"📍 您点击了：{clicked_county}{clicked_town}")
+            
+            # 检查是否已造访
+            is_visited = ((visited_df['TOWNNAME'] == clicked_town) & (visited_df['COUNTYNAME'] == clicked_county)).any()
+            
+            if is_visited:
+                st.warning("⚠️ 此地点已在您的足迹清单中。")
+            else:
+                st.info("确认将此地点加入您的足迹地图吗？")
+                if st.button("确认打卡", use_container_width=True):
+                    if save_visit(clicked_town, clicked_county):
+                        st.success(f"✅ 已记录：{clicked_county}{clicked_town}")
+                        st.balloons()
+                        # 重新加载页面以更新地图颜色
+                        st.rerun()
+
+    # --- 统计区域 ---
     st.write("---")
-    st.info(f"📍 準備打卡點：{target_name if target_name else '當前中心點'}")
+    total_towns = len(geojson_data['features'])
+    visited_count = len(visited_df)
+    progress_percentage = (visited_count / total_towns) * 100 if total_towns > 0 else 0
     
-    col1, col2 = st.columns(2)
+    col1, col2 = st.columns([1, 3])
     with col1:
-        st.metric("緯度", f"{target_lat:.6f}")
+        st.metric("已解锁乡镇", f"{visited_count} / {total_towns}")
+        st.write(f"解锁进度：{progress_percentage:.1f}%")
     with col2:
-        st.metric("經度", f"{target_lon:.6f}")
+        st.progress(progress_percentage / 100)
 
-    if st.button("📌 在此位置打卡存檔", use_container_width=True):
-        final_name = target_name if target_name else f"未命名地點_{datetime.now().strftime('%H%M')}"
-        save_point(final_name, target_lat, target_lon)
-        st.balloons()
-        st.rerun()
+    # 显示已造访清单
+    if not visited_df.empty:
+        with st.expander("查看已造访乡镇清单"):
+            st.dataframe(visited_df.sort_values(by="visited_time", ascending=False), use_container_width=True)
 
-# --- 第三部分：地圖顯示 (Google 衛星混合圖) ---
-st.subheader("🗺️ 足跡地圖")
-df_display = load_data()
-
-# 建立地圖
-m = folium.Map(
-    location=[target_lat, target_lon], 
-    zoom_start=17, 
-    tiles='https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}', 
-    attr='Google'
-)
-
-# 標記「正在搜尋的點」 (藍色)
-if search_query:
-    folium.Marker(
-        [target_lat, target_lon], 
-        popup="搜尋目標",
-        icon=folium.Icon(color="blue", icon="search")
-    ).add_to(m)
-
-# 標記「歷史已打卡的點」 (紅色)
-for _, row in df_display.iterrows():
-    folium.Marker(
-        [row['lat'], row['lon']], 
-        popup=f"{row['name']}<br>{row['time']}",
-        icon=folium.Icon(color="red", icon="check")
-    ).add_to(m)
-
-st_folium(m, width="100%", height=450)
-
-# 歷史清單
-if st.checkbox("查看歷史打卡記錄"):
-    st.dataframe(df_display.sort_values(by="time", ascending=False), use_container_width=True)
+else:
+    st.error("无法加载地图数据，请检查网络连接或 GeoJSON 链接。")

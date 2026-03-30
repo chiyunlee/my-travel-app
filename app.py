@@ -5,11 +5,13 @@ from streamlit_folium import st_folium
 import os, json, requests
 from datetime import datetime
 
+# 設定頁面
 st.set_page_config(page_title="高雄開發足跡地圖", layout="wide")
 DATA_FILE = "visited_towns.csv"
 GEOJSON_FILE = "town_fixed.json"
 URL = "https://raw.githubusercontent.com/chaoyihuang/Taiwan-GeoJSON/master/town.json"
 
+# 初始化資料檔
 if not os.path.exists(DATA_FILE):
     pd.DataFrame(columns=["TOWNNAME", "COUNTYNAME", "visited_time"]).to_csv(DATA_FILE, index=False)
 
@@ -35,6 +37,7 @@ visited_df = pd.read_csv(DATA_FILE)
 geojson_data = get_geojson()
 
 if geojson_data:
+    # 建立地圖
     m = folium.Map(location=[22.62, 120.30], zoom_start=11, tiles='https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}', attr='Google')
 
     def style_f(f):
@@ -47,16 +50,12 @@ if geojson_data:
     # 渲染地圖
     output = st_folium(m, width="100%", height=500, key="taiwan_map")
 
+    # 點擊處理
     if output and output.get("last_object_clicked_tooltip"):
         try:
             info = output["last_object_clicked_tooltip"]
-            c = info.split(',')[0].split(':')[-1].strip()
-            t = info.split(',')[1].split(':')[-1].strip()
+            c_name = info.split(',')[0].split(':')[-1].strip()
+            t_name = info.split(',')[1].split(':')[-1].strip()
             st.write("---")
-            st.subheader(f"📍 當前選取：{c} {t}")
-            if st.button(f"🚩 確認在 {t} 打卡", use_container_width=True):
-                if not ((visited_df['TOWNNAME'] == t) & (visited_df['COUNTYNAME'] == c)).any():
-                    new = pd.DataFrame([[t, c, datetime.now().strftime("%Y-%m-%d %H:%M")]], columns=["TOWNNAME", "COUNTYNAME", "visited_time"])
-                    pd.concat([visited_df, new], ignore_index=True).to_csv(DATA_FILE, index=False)
-                    st.rerun()
-        except:
+            st.subheader(f"📍 當前選取：{c_name} {t_name}")
+            if st
